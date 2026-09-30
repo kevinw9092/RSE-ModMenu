@@ -1,0 +1,8 @@
+# Mod Menu settings. You can also change these in game: Esc > MODS > Mod Menu.
+ShowInPauseMenu = true   # adds MODS to the pause menu (Esc)
+MenuKey = none           # optional key that opens the menu anywhere, including the main menu, e.g. HOME (avoid F10 and F11)
+
+# Size of the whole menu as a percentage. 100 = the size it has always been, 75 = smaller.
+# The panel and the text scale together, and it stays centred. Anything outside 50-200 is clamped,
+# and it is clamped again to whatever fits on your screen so the buttons can always be reached.
+PanelScale = 100

@@ -1,0 +1,7 @@
+# Mod Menu Example settings. Change them in game: Esc > MODS > Mod Menu Example.
+Rate = 1       # decimal slider
+Count = 5      # whole-number slider
+Enabled = true
+Mode = Detailed
+Hotkey = HOME
+Title = Hello

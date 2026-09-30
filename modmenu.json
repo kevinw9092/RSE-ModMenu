@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "id": "ModMenu",
+  "name": "Mod Menu",
+  "author": "Maxxfilth",
+  "version": "1.0.12",
+  "description": "One place for every mod's settings.",
+  "settings": [
+    {
+      "key": "ShowInPauseMenu",
+      "type": "toggle",
+      "label": "Show MODS in the pause menu",
+      "default": true,
+      "tooltip": "Turn off only if you set a key below, or you will have no way to open this menu.",
+      "restart": true
+    },
+    {
+      "key": "MenuKey",
+      "type": "key",
+      "label": "Open key (optional)",
+      "default": "none",
+      "tooltip": "Opens this menu anywhere, including the main menu. Avoid F10 and F11.",
+      "restart": true
+    },
+    {
+      "key": "PanelScale",
+      "type": "slider",
+      "label": "Menu size",
+      "min": 50,
+      "max": 200,
+      "step": 5,
+      "default": 100,
+      "tooltip": "Size of this menu as a percentage. It resizes as you drag, and will not grow past what fits on your screen."
+    }
+  ]
+}

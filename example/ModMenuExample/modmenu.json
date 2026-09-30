@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "name": "Mod Menu Example",
+  "author": "Maxxfilth",
+  "version": "1.0.0",
+  "description": "Example mod showing every setting type. Copy this folder to start your own.",
+  "settings": [
+    {
+      "type": "header",
+      "label": "Numbers"
+    },
+    {
+      "key": "Rate",
+      "type": "slider",
+      "label": "Rate",
+      "min": 0.1,
+      "max": 10,
+      "step": 0.1,
+      "suffix": "x",
+      "default": 1,
+      "tooltip": "A decimal slider."
+    },
+    {
+      "key": "Count",
+      "type": "number",
+      "label": "Count",
+      "min": 0,
+      "max": 20,
+      "step": 1,
+      "default": 5,
+      "tooltip": "A whole-number slider."
+    },
+    {
+      "type": "header",
+      "label": "Switches"
+    },
+    {
+      "key": "Enabled",
+      "type": "toggle",
+      "label": "Enabled",
+      "default": true,
+      "tooltip": "A checkbox."
+    },
+    {
+      "key": "Mode",
+      "type": "choice",
+      "label": "Mode",
+      "options": [
+        "Simple",
+        "Detailed",
+        "Off"
+      ],
+      "default": "Detailed",
+      "tooltip": "A carousel."
+    },
+    {
+      "key": "Hotkey",
+      "type": "key",
+      "label": "Hotkey",
+      "default": "HOME",
+      "tooltip": "A key picker. Keys are registered at startup, so this applies after a restart.",
+      "restart": true
+    },
+    {
+      "key": "Title",
+      "type": "text",
+      "label": "Title",
+      "default": "Hello",
+      "maxLength": 20,
+      "tooltip": "A text box."
+    },
+    {
+      "type": "button",
+      "label": "SAY HELLO",
+      "action": "hello",
+      "tooltip": "Sends an action to the mod."
+    }
+  ],
+  "id": "ModMenuExample"
+}
