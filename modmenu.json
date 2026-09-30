@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "id": "ModMenu",
-  "name": "Mod Menu",
-  "author": "Maxxfilth",
-  "version": "1.0.12",
+  "name": "RSE-ModMenu",
+  "author": "Maxxfilth, RSE contributors",
+  "version": "1.1.0",
   "description": "One place for every mod's settings.",
   "settings": [
     {

@@ -1,3 +1,7 @@
+# RSE-ModMenu
+
+*Part of **RSE** (RuneScape Enhanced). Based on **Mod Menu** by Maxxfilth (MIT). The id and shared variables are unchanged, so every mod that supports Mod Menu works with RSE-ModMenu. Don't install both: the second copy stays off and says so in the log. What changed: see `CHANGELOG.md`.*
+
 # Mod Menu for RuneScape: Dragonwilds: guide for mod authors
 
 Mod Menu adds one **MODS** button to the pause menu (Esc). Every installed mod that ships a
@@ -158,4 +162,4 @@ The UE4SS log shows `[ModMenu]` lines with any load problems.
   into it, A selects or toggles, left/right changes a slider, B closes. Key pickers and text boxes need a keyboard.
 - Co-op guests are untested.
 
-License: MIT (see LICENSE).
+License: MIT (see LICENSE). Original work by Maxxfilth; RSE changes by the RSE contributors.

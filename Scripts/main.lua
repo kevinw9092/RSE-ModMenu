@@ -1,4 +1,6 @@
--- Mod Menu - RuneScape: Dragonwilds
+-- RSE-ModMenu - RuneScape: Dragonwilds
+-- Based on Mod Menu by Maxxfilth (MIT). The mod id stays "ModMenu" and every shared variable name is
+-- unchanged, so mods written for Mod Menu keep working.
 --
 -- One MODS entry in the pause menu (Esc). Every installed mod that ships a modmenu.json file gets a
 -- page of settings there, drawn with the game's own checkboxes, sliders and buttons.
@@ -16,7 +18,7 @@
 -- folder can be listed with IterateGameDirectories, and the game's settings widgets can be created.
 
 local TAG = "[ModMenu] "
-local VERSION = "1.0.12"
+local VERSION = "1.1.0"
 local SCHEMA = 1
 local function log(msg) print(TAG .. tostring(msg) .. "\n") end
 
@@ -39,6 +41,12 @@ local function valid(o)
     return ok and v
 end
 
+local function get(fn)
+    local ok, v = pcall(fn)
+    if ok then return v end
+    return nil
+end
+
 -- JSON --------------------------------------------------------------------------------------------
 -- Small strict decoder: objects, arrays, strings (with \uXXXX), numbers, true/false/null.
 local json = {}
@@ -55,7 +63,9 @@ do
     local function utf8char(cp)
         if cp < 0x80 then return string.char(cp)
         elseif cp < 0x800 then return string.char(0xC0 + math.floor(cp / 0x40), 0x80 + cp % 0x40)
-        else return string.char(0xE0 + math.floor(cp / 0x1000), 0x80 + math.floor(cp / 0x40) % 0x40, 0x80 + cp % 0x40) end
+        elseif cp < 0x10000 then return string.char(0xE0 + math.floor(cp / 0x1000), 0x80 + math.floor(cp / 0x40) % 0x40, 0x80 + cp % 0x40)
+        else return string.char(0xF0 + math.floor(cp / 0x40000), 0x80 + math.floor(cp / 0x1000) % 0x40,
+                                0x80 + math.floor(cp / 0x40) % 0x40, 0x80 + cp % 0x40) end
     end
     local value
     local function err(s, i, what) error(string.format("%s at character %d", what, i), 0) end
@@ -72,7 +82,13 @@ do
                 elseif n == "u" then
                     local hex = s:sub(j + 2, j + 5)
                     if not hex:match("^%x%x%x%x$") then err(s, j, "bad \\u escape") end
-                    out[#out + 1] = utf8char(tonumber(hex, 16)); j = j + 6
+                    local cp = tonumber(hex, 16); j = j + 6
+                    -- A surrogate pair (😀) is one character above U+FFFF, e.g. an emoji.
+                    local low = s:match("^\\u([dD][c-fC-F]%x%x)", j)
+                    if cp >= 0xD800 and cp <= 0xDBFF and low then
+                        cp = 0x10000 + (cp - 0xD800) * 0x400 + (tonumber(low, 16) - 0xDC00); j = j + 6
+                    end
+                    out[#out + 1] = utf8char(cp)
                 else err(s, j, "bad escape") end
             else out[#out + 1] = c; j = j + 1 end
         end
@@ -135,15 +151,37 @@ do
             return m[ch] or string.format("\\u%04x", ch:byte())
         end) .. '"'
     end
+    -- Nested objects and arrays are written back too: the flat-only writer dropped them, so saving one
+    -- setting erased every nested value in a mod's JSON config.
+    local function isArray(t)
+        local n = #t
+        if n == 0 then return false end
+        for k in pairs(t) do
+            if type(k) ~= "number" or k < 1 or k > n or k % 1 ~= 0 then return false end
+        end
+        return true
+    end
+    local function encodeValue(v, indent)
+        local tv = type(v)
+        if tv == "boolean" or tv == "number" then return tostring(v) end
+        if tv ~= "table" then return esc(tostring(v)) end
+        local inner = indent .. "  "
+        local parts = {}
+        if isArray(v) then
+            for i = 1, #v do parts[i] = inner .. encodeValue(v[i], inner) end
+            return "[\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "]"
+        end
+        local keys = {}
+        for k in pairs(v) do keys[#keys + 1] = tostring(k) end
+        if #keys == 0 then return "{}" end
+        table.sort(keys)
+        for _, k in ipairs(keys) do parts[#parts + 1] = inner .. esc(k) .. ": " .. encodeValue(v[k], inner) end
+        return "{\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "}"
+    end
     function json.encodeFlat(obj, order)
         local lines = {}
         for _, k in ipairs(order) do
-            local v = obj[k]
-            local out
-            if type(v) == "boolean" then out = tostring(v)
-            elseif type(v) == "number" then out = tostring(v)
-            else out = esc(tostring(v)) end
-            lines[#lines + 1] = "  " .. esc(k) .. ": " .. out
+            lines[#lines + 1] = "  " .. esc(k) .. ": " .. encodeValue(obj[k], "  ")
         end
         return "{\n" .. table.concat(lines, ",\n") .. "\n}\n"
     end
@@ -160,11 +198,29 @@ local function readFile(path)
     return s or ""
 end
 
+-- Writes through a temporary file, so a crash or a full disk mid-write never leaves a mod's config half
+-- written: the old file stays until the new one is complete. Windows' rename does not replace an existing
+-- file, so the old one is moved aside first and put back if the swap fails.
 local function writeFile(path, text)
-    local f = io.open(path, "wb")
+    local tmp, old = path .. ".modmenu-tmp", path .. ".modmenu-old"
+    local f = io.open(tmp, "wb")
     if not f then return false end
-    f:write(text)
+    local okW = f:write(text) ~= nil
     f:close()
+    if not okW then os.remove(tmp); return false end
+    os.remove(old)
+    local hadOld = os.rename(path, old)
+    if os.rename(tmp, path) then
+        if hadOld then os.remove(old) end
+        return true
+    end
+    if hadOld then os.rename(old, path) end
+    -- Renaming not allowed here (read-only folder, antivirus lock): write in place as before.
+    os.remove(tmp)
+    local g = io.open(path, "wb")
+    if not g then return false end
+    g:write(text)
+    g:close()
     return true
 end
 
@@ -385,7 +441,10 @@ local function saveValues(m)
         for _, s in ipairs(m.settings) do
             if s.key then obj[s.key] = m.values[s.key]; order[#order + 1] = s.key; seenK[s.key] = true end
         end
-        for k in pairs(obj) do if not seenK[k] and type(obj[k]) ~= "table" then order[#order + 1] = k end end
+        local rest = {}
+        for k in pairs(obj) do if not seenK[k] then rest[#rest + 1] = k end end
+        table.sort(rest, function(a, b) return tostring(a) < tostring(b) end)
+        for _, k in ipairs(rest) do order[#order + 1] = k end
         return writeFile(m.cfgPath, json.encodeFlat(obj, order))
     end
     local text = readFile(m.cfgPath) or ""
@@ -459,8 +518,9 @@ local function loadSchema(folderName, dirPath)
     local m = { folder = folderName, dir = dirPath, errors = {}, settings = {}, values = {}, rev = 0, actionN = 0 }
     local text, ferr = nil, nil
     for _, fname in ipairs(SCHEMA_FILES) do
-        text, ferr = readFile(dirPath .. "\\" .. fname)
-        if text then break end
+        local t, e = readFile(dirPath .. "\\" .. fname)
+        if t then text = t; break end
+        ferr = ferr or e                                   -- keep "larger than 256 KB" from the first file
     end
     if not text then m.errors[#m.errors + 1] = ferr or "modmenu.json could not be read"; text = nil end
     local doc, jerr = nil, nil
@@ -587,7 +647,7 @@ local function modsFromDirListing()
     return out, modsRoot
 end
 
-local function addMod(list, byId, folder, path, count)
+local function addMod(list, byId, folder, path)
     local okL, m = pcall(loadSchema, tostring(folder), tostring(path))
     if okL and m then
         local prev = modsById[m.id]
@@ -646,19 +706,7 @@ local function discover()
             end
             if has and count < 100 then
                 count = count + 1
-                local okL, m = pcall(loadSchema, tostring(folder), tostring(sub.__absolute_path))
-                if okL and m then
-                    local prev = modsById[m.id]
-                    if prev and prev.folder == m.folder then m.rev = prev.rev; m.actionN = prev.actionN end
-                    if byId[m.id] then
-                        m.errors[#m.errors + 1] = "id '" .. m.id .. "' is also used by " .. byId[m.id].folder
-                        m.id = m.id .. "_" .. m.folder
-                    end
-                    byId[m.id] = m
-                    list[#list + 1] = m
-                else
-                    log("could not load " .. tostring(folder) .. ": " .. tostring(m))
-                end
+                addMod(list, byId, folder, sub.__absolute_path)
             end
         end
     end
@@ -724,6 +772,16 @@ local function localPC()
     end
     return nil
 end
+
+-- The game tells every controller when it gets its pawn: remember the local in-world one, so localPC()
+-- rarely needs its object scan.
+pcall(RegisterHook, "/Script/Engine.PlayerController:ClientRestart", function(self)
+    local pc = get(function() return self:get() end)
+    if not valid(pc) then return end
+    local isLocal = get(function() return pc:IsLocalController() end)
+    local n = get(function() return pc:GetFullName() end) or ""
+    if isLocal and not tostring(n):find("MainMenu", 1, true) then cachedPC = pc end
+end)
 
 -- Any local controller, including the main menu's, so the menu also opens from the title screen.
 local function anyPC()
@@ -796,16 +854,16 @@ local function findPauseMenu()
     return nil
 end
 
+-- Clicks reach MODS through the single click hook registered in hookPanel().
+local clickHookOk = nil
 local function hookClicks()
     if MENU.hooked then return end
     MENU.hooked = true
-    local ok = pcall(RegisterHook, "/Script/CommonUI.CommonButtonBase:HandleButtonClicked", function(self)
-        local okN, n = pcall(function() return self:get():GetFullName() end)
-        if not okN then return end
-        if n == MENU.btnName then MENU.pending = "open"
-        elseif MENU.closeName and n == MENU.closeName then MENU.pending = "close" end
-    end)
-    if not ok then log("could not watch menu clicks; use the key instead") end
+    if clickHookOk == false then log("could not watch menu clicks; use the key instead") end
+end
+local function menuClicked(n)
+    if n == MENU.btnName then MENU.pending = "open"
+    elseif MENU.closeName and n == MENU.closeName then MENU.pending = "close" end
 end
 
 local function menuHas(box, w)
@@ -828,10 +886,14 @@ local function ensureMenuButton()
     if MENU.wait > 0 then MENU.wait = MENU.wait - 1; return end
     MENU.wait = 4
     MENU.pm = nil
-    local pc = localPC()                               -- no world, no pause menu: skip the object search
-    if not pc then return end
+    -- The pause menu is found without scanning objects (see findPauseMenu), and its owning player is the
+    -- controller to build with. Asking localPC() first, as before, ran FindAllOf("PlayerController")
+    -- (about 50 ms) every 3 seconds for as long as the game sat on the title screen.
     local pm = findPauseMenu()
     if not pm then return end
+    local pc = get(function() return pm:GetOwningPlayer() end)
+    if not valid(pc) then pc = localPC() end
+    if not pc then return end
     local box = pm.VerticalBox_PauseMenu
     if not valid(box) then return end
     local label = MENU.labelFn and MENU.labelFn() or MENU.label
@@ -1123,26 +1185,11 @@ local function fillPage(ui, idx)
             -- Filling the carousel's SelectableChoices (an array of FText) from Lua corrupted the game's
             -- memory: a page with one choice row crashed within 3-6 opens (heap "realloc an unrecognized
             -- block", or an access violation at a heap address), the same page without it never did.
-            -- Found 2026-09-25 building Weather Control's page. The code below is kept for reference only.
-            local w = nil
-            local okChoices = false
-            if w then
-                pcall(function() w.LabelText = FText(rowLabel(s)) end)
-                okChoices = pcall(function()
-                    local list = {}
-                    for i, o in ipairs(s.options) do list[i] = FText(o) end
-                    w.SelectableChoices = list
-                end)
-            end
-            if w and okChoices then
-                row.widget = w
-                holder = sized(ui.tree, w, W, 56)
-            else
-                local b = makeGameButton(pc, s.label, ui.like)
-                row.widget, row.cycle = b, true
-                if b then panel.buttons.actions[b:GetFullName()] = { cycle = row } end
-                holder = b and sized(ui.tree, b, W, 56) or nil
-            end
+            -- Found 2026-09-25 building Weather Control's page.
+            local b = makeGameButton(pc, s.label, ui.like)
+            row.widget, row.cycle = b, true
+            if b then panel.buttons.actions[b:GetFullName()] = { cycle = row } end
+            holder = b and sized(ui.tree, b, W, 56) or nil
         elseif s.type == "key" then
             local w = construct("InputKeySelector", ui.tree)
             styleInput(w)
@@ -1226,14 +1273,28 @@ buildModList = function(ui, query)
     if panel.mode == "pad" and panel.ui == ui then pcall(PAD.afterFill, ui) end
 end
 
+-- A failed save (file locked by an editor or antivirus) is retried every 5 seconds, up to 5 times,
+-- instead of being dropped, which lost the player's change silently at the next restart.
+local saveFails = {}
 local function saveDirty(force)
+    local now = os.clock()
     for id in pairs(panel.dirty) do
         local m = modsById[id]
-        if m and (force or os.clock() - panel.lastEdit > 1.0) then
-            local ok, res = pcall(saveValues, m)
-            if not ok or not res then log("could not save settings for " .. m.name .. ": " .. tostring(res))
-            else log("saved " .. m.name) end
+        local f = saveFails[id]
+        if not m then
             panel.dirty[id] = nil
+        elseif (force or now - panel.lastEdit > 1.0) and (not f or force or now >= f.retryAt) then
+            local ok, res = pcall(saveValues, m)
+            if ok and res then
+                log("saved " .. m.name)
+                panel.dirty[id], saveFails[id] = nil, nil
+            else
+                f = f or { n = 0 }
+                f.n, f.retryAt = f.n + 1, now + 5
+                saveFails[id] = f
+                log("could not save settings for " .. m.name .. " (try " .. f.n .. "): " .. tostring(res))
+                if f.n >= 5 then panel.dirty[id], saveFails[id] = nil, nil end
+            end
         end
     end
 end
@@ -1367,16 +1428,20 @@ local function clickPanelButton(n)
     elseif n == b.close then panel.pending = { close = true } end
 end
 
+-- One hook for every button click in the game (was two). The name is read once, and only while one of
+-- our buttons exists.
 local panelHooked = false
 local function hookPanel()
     if panelHooked then return end
     panelHooked = true
-    pcall(RegisterHook, "/Script/CommonUI.CommonButtonBase:HandleButtonClicked", function(self)
-        if not panel.open then return end
+    clickHookOk = pcall(RegisterHook, "/Script/CommonUI.CommonButtonBase:HandleButtonClicked", function(self)
+        if not panel.open and not MENU.btnName then return end
         local okN, n = pcall(function() return self:get():GetFullName() end)
         if not okN then return end
-        clickPanelButton(n)
+        if panel.open then clickPanelButton(n) end
+        menuClicked(n)
     end)
+    if not clickHookOk then log("could not watch button clicks; use the menu key instead") end
 end
 
 -- Controller path (PAD table and constants: next to MENU). Measured in game 2026-09-29, game in front
@@ -1610,6 +1675,20 @@ local function loadOwnConfig()
     for k, v in pairs(m.values) do if cfg[k] ~= nil then cfg[k] = v end end
 end
 
+-- Two copies (the original ModMenu folder and RSE-ModMenu) would both add MODS to the pause menu and both
+-- write the same config files. The first copy to load claims ModMenu.instance with its folder; a second
+-- copy stands down. The same folder again is a UE4SS hot reload of this copy, which is fine.
+local myPath = modRoot() or "?"
+do
+    local ok, owner = pcall(function() return ModRef:GetSharedVariable("ModMenu.instance") end)
+    if ok and type(owner) == "string" and owner ~= "" and owner ~= myPath then
+        log("another Mod Menu is already loaded from " .. owner .. "; this copy (" .. myPath .. ") stays off. "
+            .. "Remove one of the two folders.")
+        return
+    end
+    share("ModMenu.instance", myPath)
+end
+
 loadOwnConfig()
 share("ModMenu.version", VERSION)
 pcall(discover)
@@ -1659,12 +1738,6 @@ end
 log("loaded v" .. VERSION .. ", " .. #mods .. " configurable mods found.")
 
 local tickErrors = 0
--- Game-thread work only when the previous job has finished. Queuing a job every tick regardless
--- piles them up during a world-load stall and ABORTS UE4SS (Open All, 2026-09-17: abort
--- 0x40000015 the moment a world finished loading, after a 6.8 s stall).
--- The 5 s release is for the case where UE4SS drops the job and never runs it, which would
--- otherwise latch `queued` true forever and freeze the mod (Open All's second audit found that).
-local queued, queuedAt = false, 0
 -- Main loop ON THE GAME THREAD. UE4SS runs LoopAsync callbacks on a separate thread without the lock
 -- its game-thread side holds, so a LoopAsync mod's Lua can run on two OS threads at once (measured
 -- 2026-09-23: ~1,480 overlaps in 150 jobs on stable and latest UE4SS alike; on the newer build it
@@ -1687,6 +1760,9 @@ end)
 if okLoop then print("[ModMenu] main loop on the game thread\n") end
 if not okLoop then
     -- Older UE4SS without LoopInGameThreadWithDelay: the previous guarded LoopAsync route.
+    -- Game-thread work only when the previous job has finished: queuing one every tick piles them up during
+    -- a world-load stall and aborts UE4SS (Open All, 2026-09-17). The 5 s release covers a job UE4SS
+    -- dropped, which would otherwise latch `queued` forever.
     local queued, queuedAt = false, 0
     LoopAsync(250, function()
         if queued and os.clock() - queuedAt > 5 then queued = false end
