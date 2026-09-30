@@ -3,7 +3,7 @@
   "id": "ModMenu",
   "name": "RSE-ModMenu",
   "author": "StrawMaple",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "One place for every mod's settings.",
   "settings": [
     {

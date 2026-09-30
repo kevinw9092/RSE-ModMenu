@@ -2,6 +2,15 @@
 
 RSE-ModMenu is Mod Menu 1.0.12 by Maxxfilth (MIT) with the fixes below. The mod id (`ModMenu`) and every shared variable name are unchanged, so every mod that supports Mod Menu works as before.
 
+## 1.1.1 (RSE)
+**Safety**
+- **Map loads:** the menu now forgets the pause menu, its MODS button, the panel and the player controller when a map starts loading, and waits 10 s after the load before touching the game again. Calling into an object of the old world can crash the game; Esc shows MODS again once the settle is over.
+- The pause menu reported by the game is kept as a path, not an object.
+- **Saves:** a failed write or close (a full disk) now counts as a failed save, including in the fallback that writes in place. A config left moved aside by a crash between the two renames is put back before it is read.
+
+**Speed**
+- While the pause menu is open, the check that MODS is still in its list runs once a second instead of every tick.
+
 ## 1.1.0 (RSE)
 **Safety**
 - **Config files are written safely.** A save goes to a temporary file first and replaces the real file only once it's complete. A crash, full disk or antivirus lock mid-save can no longer leave a mod's `config.txt` empty or half written. If renaming isn't allowed there, it writes in place as before.

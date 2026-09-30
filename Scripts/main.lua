@@ -18,7 +18,7 @@
 -- folder can be listed with IterateGameDirectories, and the game's settings widgets can be created.
 
 local TAG = "[ModMenu] "
-local VERSION = "1.1.0"
+local VERSION = "1.1.1"
 local SCHEMA = 1
 local function log(msg) print(TAG .. tostring(msg) .. "\n") end
 
@@ -206,8 +206,8 @@ local function writeFile(path, text)
     local f = io.open(tmp, "wb")
     if not f then return false end
     local okW = f:write(text) ~= nil
-    f:close()
-    if not okW then os.remove(tmp); return false end
+    local okC = f:close()                              -- a full disk can fail only here, when the buffer is flushed
+    if not (okW and okC) then os.remove(tmp); return false end
     os.remove(old)
     local hadOld = os.rename(path, old)
     if os.rename(tmp, path) then
@@ -219,9 +219,21 @@ local function writeFile(path, text)
     os.remove(tmp)
     local g = io.open(path, "wb")
     if not g then return false end
-    g:write(text)
+    local okG = g:write(text) ~= nil
+    local okGC = g:close()
+    return (okG and okGC) and true or false
+end
+
+-- A crash between writeFile's two renames leaves a mod's config moved aside with nothing at its own name.
+-- Put it back before the file is read, or the mod would start from defaults and the next save would bury it.
+local function restoreMovedAside(path)
+    local f = io.open(path, "rb")
+    if f then f:close(); return end
+    local old = path .. ".modmenu-old"
+    local g = io.open(old, "rb")
+    if not g then return end
     g:close()
-    return true
+    if os.rename(old, path) then log("restored " .. path .. " from an interrupted save") end
 end
 
 -- Schemas -----------------------------------------------------------------------------------------
@@ -559,6 +571,7 @@ local function loadSchema(folderName, dirPath)
     elseif text then
         m.errors[#m.errors + 1] = "modmenu.json has no \"settings\" list"
     end
+    restoreMovedAside(m.cfgPath)
     loadValues(m)
     return m
 end
@@ -796,7 +809,7 @@ local function anyPC()
     return nil
 end
 
-local MENU = { label = "MOD", onOpen = nil, onClose = nil, labelFn = nil, shownLabel = nil, btn = nil, btnName = nil, pm = nil, closeName = nil, pending = nil, hooked = false, wait = 0, broken = false }
+local MENU = { label = "MOD", onOpen = nil, onClose = nil, labelFn = nil, shownLabel = nil, btn = nil, btnName = nil, pm = nil, closeName = nil, pending = nil, hooked = false, wait = 0, checkN = 0, broken = false }
 
 -- Controller support (1.0.12). A pad's A reaches CommonButtonBase:HandleButtonClicked from C++, so the UE4SS hook
 -- that the mouse path relies on never sees it (measured 2026-09-29: 0 hooks fire for a pad click, even on the
@@ -830,9 +843,14 @@ end
 
 -- The game creates its pause menu the first time Esc is pressed. Searching for it with FindFirstOf
 -- walks every object (35-50 ms on the game thread), so instead the game tells us when one is created
--- (the callback only stores it), plus one fallback search shortly after Esc.
+-- (the callback only stores its path), plus one fallback search shortly after Esc. Paths, not objects:
+-- a menu made just before a map load is freed with its world, and a kept object would then be freed memory.
 local pauseSeen, pauseKnown, pauseLookAt = {}, nil, 0
-pcall(NotifyOnNewObject, "/Script/Dominion.PauseMenuScreen", function(obj) pauseSeen[#pauseSeen + 1] = obj end)
+pcall(NotifyOnNewObject, "/Script/Dominion.PauseMenuScreen", function(obj)
+    local okN, n = pcall(function() return obj:GetFullName() end)
+    local path = okN and tostring(n):match("^%S+%s+(.+)$")       -- "Class /Path:Object" -> "/Path:Object"
+    if path then pauseSeen[#pauseSeen + 1] = path end
+end)
 pcall(RegisterKeyBind, Key.ESCAPE, function() pauseLookAt = os.clock() + 0.5 end)
 local function usablePause(pm)
     if not valid(pm) then return false end
@@ -842,7 +860,8 @@ end
 local function findPauseMenu()
     if valid(MENU.pm) then return MENU.pm end
     while #pauseSeen > 0 do                            -- newest first
-        local pm = table.remove(pauseSeen)
+        local path = table.remove(pauseSeen)
+        local pm = get(function() return StaticFindObject(path) end)
         if usablePause(pm) then pauseSeen = {}; pauseKnown = pm end
     end
     if usablePause(pauseKnown) then return pauseKnown end
@@ -873,6 +892,10 @@ end
 
 local function ensureMenuButton()
     if valid(MENU.pm) and valid(MENU.btn) then
+        -- Still in place? Asked every 4th tick (1 s), not every tick: the answer only changes when the
+        -- game rebuilds its pause list, and MODS then comes back a second later at most.
+        MENU.checkN = MENU.checkN + 1
+        if MENU.checkN % 4 ~= 0 then return end
         local box = MENU.pm.VerticalBox_PauseMenu
         if valid(box) and menuHas(box, MENU.btn) then
             if MENU.labelFn then
@@ -1698,11 +1721,17 @@ MENU.label = "MODS"
 MENU.onOpen = function() openPanel() end
 MENU.onClose = function() closePanel() end
 
+-- Map loads pause everything until the new world has settled (the hooks are below the Esc handling).
+local SETTLE = 10
+local idleUntil = 0
+local function paused() return os.clock() < idleUntil end
+
 local menuKey = Key[(cfg.MenuKey or ""):upper()]
 local noKey = (cfg.MenuKey or ""):lower() == "none" or cfg.MenuKey == ""
 if menuKey and not noKey then
     RegisterKeyBind(menuKey, function()
         ExecuteInGameThread(function()
+            if paused() then return end
             local ok, err = pcall(function() if panel.open then closePanel() else openPanel() end end)
             if not ok then log("panel error: " .. tostring(err)) end
         end)
@@ -1735,6 +1764,31 @@ local function escTick()
     if not (ok and shown) and valid(pc) and not panel.open then setInputUI(pc, nil, false) end
 end
 
+-- Map loads: drop every held game object WITHOUT touching it (no widget calls, not even to close the
+-- panel) and stay idle until the new world has settled, as RSE-Fixes does. A controller, pause menu or
+-- widget of the old world is freed with it, and calling into one crashes the game natively (a pcall
+-- cannot catch it). Settings changed just before the load are saved first (file work only). After the
+-- settle, the pause menu is found again as on first launch: its creation, or the search after Esc.
+local function forgetWorld()
+    pcall(saveDirty, true)
+    cachedPC, nextPCScan = nil, 0
+    pauseSeen, pauseKnown, pauseLookAt = {}, nil, 0
+    MENU.pm, MENU.btn, MENU.btnName, MENU.shownLabel = nil, nil, nil, nil
+    MENU.pending, MENU.wait = nil, 0
+    PAD.seen = false
+    panel.open, panel.frame, panel.ui, panel.rows, panel.buttons = false, nil, nil, {}, {}
+    panel.mode, panel.padBtns, panel.order, panel.pm, panel.pc = nil, nil, nil, nil, nil
+    panel.pending, panel.hintShown = nil, nil
+    escCheck = nil
+    idleUntil = os.clock() + 60                        -- the load-finished hook shortens this to SETTLE
+end
+if type(RegisterLoadMapPreHook) == "function" then
+    pcall(RegisterLoadMapPreHook, function() forgetWorld() end)
+end
+if type(RegisterLoadMapPostHook) == "function" then
+    pcall(RegisterLoadMapPostHook, function() idleUntil = os.clock() + SETTLE end)
+end
+
 log("loaded v" .. VERSION .. ", " .. #mods .. " configurable mods found.")
 
 local tickErrors = 0
@@ -1743,6 +1797,7 @@ local tickErrors = 0
 -- 2026-09-23: ~1,480 overlaps in 150 jobs on stable and latest UE4SS alike; on the newer build it
 -- corrupted a mod's Lua state under load). LoopInGameThreadWithDelay keeps all of it on one thread.
 local function mainTick()
+    if paused() then return end                        -- a map load is settling (see forgetWorld)
     local ok, err = pcall(panelTick)
     if not ok then
         tickErrors = tickErrors + 1
