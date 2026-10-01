@@ -18,7 +18,7 @@
 -- folder can be listed with IterateGameDirectories, and the game's settings widgets can be created.
 
 local TAG = "[ModMenu] "
-local VERSION = "1.1.1"
+local VERSION = "1.1.2"
 local SCHEMA = 1
 local function log(msg) print(TAG .. tostring(msg) .. "\n") end
 
@@ -846,10 +846,17 @@ end
 -- (the callback only stores its path), plus one fallback search shortly after Esc. Paths, not objects:
 -- a menu made just before a map load is freed with its world, and a kept object would then be freed memory.
 local pauseSeen, pauseKnown, pauseLookAt = {}, nil, 0
+local pauseClassPath = nil                             -- the pause menu's Blueprint class (a path), for the hook below
+local function notePauseClass(pm)
+    if pauseClassPath then return end
+    local okC, c = pcall(function() return pm:GetClass():GetFullName() end)
+    pauseClassPath = okC and tostring(c):match("^%S+%s+(.+)$") or nil
+end
 pcall(NotifyOnNewObject, "/Script/Dominion.PauseMenuScreen", function(obj)
     local okN, n = pcall(function() return obj:GetFullName() end)
     local path = okN and tostring(n):match("^%S+%s+(.+)$")       -- "Class /Path:Object" -> "/Path:Object"
     if path then pauseSeen[#pauseSeen + 1] = path end
+    notePauseClass(obj)
 end)
 pcall(RegisterKeyBind, Key.ESCAPE, function() pauseLookAt = os.clock() + 0.5 end)
 local function usablePause(pm)
@@ -868,9 +875,35 @@ local function findPauseMenu()
     if pauseLookAt > 0 and os.clock() >= pauseLookAt then
         pauseLookAt = 0
         local ok, pm = pcall(FindFirstOf, "WBP_PauseMenuScreen_C")
-        if ok and usablePause(pm) then pauseKnown = pm; return pm end
+        if ok and usablePause(pm) then pauseKnown = pm; notePauseClass(pm); return pm end
     end
     return nil
+end
+
+-- Pause menu opened (1.1.2): CommonUI asks an activating screen for the widget to focus, through
+-- BP_GetDesiredFocusTarget. WBP_PauseMenuScreen_C overrides it (WBP_PauseMenuScreen.hpp), so the hook goes on
+-- that Blueprint class; its asset path is not in the dumps, so it is read from the first pause menu seen
+-- (above). The hook records the menu's path and lets the button check run on the next tick, the same as
+-- the search after Esc, which stays as the fallback (and still finds the very first menu after launch).
+-- A different menu than the one MODS was added to means the game made a new one: build there instead.
+local pauseHook = nil                                  -- nil: not tried yet; true/false: registered or not
+local function pauseActivated(pm)
+    local okN, n = pcall(function() return pm:GetFullName() end)
+    local path = okN and tostring(n):match("^%S+%s+(.+)$")
+    if not path or path:find("Default__", 1, true) then return end
+    if path == MENU.pmPath and valid(MENU.pm) then return end
+    if pauseSeen[#pauseSeen] ~= path then pauseSeen[#pauseSeen + 1] = path end
+    MENU.pm, MENU.wait = nil, 0
+end
+local function hookPauseActivation()
+    if pauseHook ~= nil or not pauseClassPath then return end
+    local fn = pauseClassPath .. ":BP_GetDesiredFocusTarget"
+    local ok, err = pcall(RegisterHook, fn, function(self)
+        local pm = get(function() return self:get() end)
+        if valid(pm) then pcall(pauseActivated, pm) end
+    end)
+    pauseHook = ok
+    if not ok then log("pause menu open event unavailable, using Esc instead: " .. tostring(err)) end
 end
 
 -- Clicks reach MODS through the single click hook registered in hookPanel().
@@ -880,8 +913,8 @@ local function hookClicks()
     MENU.hooked = true
     if clickHookOk == false then log("could not watch menu clicks; use the key instead") end
 end
-local function menuClicked(n)
-    if n == MENU.btnName then MENU.pending = "open"
+local function menuClicked(n, pad)                    -- pad: a pad's A, reported by BP_OnClicked (see hookPanel)
+    if n == MENU.btnName then MENU.pending = pad and "pad" or "open"
     elseif MENU.closeName and n == MENU.closeName then MENU.pending = "close" end
 end
 
@@ -922,33 +955,72 @@ local function ensureMenuButton()
     local label = MENU.labelFn and MENU.labelFn() or MENU.label
     local b = makeGameButton(pc, label, pm.SettingsButton)
     if not b then return end
-    local own = {}
-    for _, name in ipairs({ "ResumeButton", "AgilityCourseSection", "PlayerListButton", "WorldDetails",
-                            "SettingsButton", "ExitToMainMenuButton", "ExitToDesktopMenu" }) do
-        local w = pm[name]
-        if valid(w) then own[w:GetFullName()] = true end
-    end
     local function sortKey(w)
         local okL, l = pcall(function() return w.ButtonLabel:ToString() end)
         l = okL and tostring(l) or ""
         return (l:gsub("^SHOW ", ""):gsub("^HIDE ", ""))
     end
-    local extras = { b }
+    -- Only mod buttons are ever moved (1.1.2). The game's own children (agility course buttons, the Unstuck
+    -- button, the input legend entries and anything unknown) stay where they are; before, every child not on
+    -- a short list was re-sorted by label too. A mod button is one made at runtime by
+    -- WidgetBlueprintLibrary:Create, which names it "WBP_DomAllCapsButton_C_<n>" (MODS and the same block in
+    -- other mods); the game's own children carry their designer names (ResumeButton, ...).
+    local function modMade(c)
+        local okN, n = pcall(function() return c:GetFName():ToString() end)
+        return okN and tostring(n):match("^WBP_DomAllCapsButton_C_%d+$") ~= nil
+    end
+    local extras, isExtra = { b }, {}
     for i = box:GetChildrenCount() - 1, 0, -1 do
         local c = box:GetChildAt(i)
-        if valid(c) and not own[c:GetFullName()] then extras[#extras + 1] = c end
+        if valid(c) and modMade(c) then extras[#extras + 1] = c; isExtra[c:GetFullName()] = true end
     end
-    local exits = {}
+    -- Mod buttons go above the exits. VerticalBox can only append, so the exits are moved below them, but
+    -- only when nothing of the game's own follows them (their order among the game's children is kept, and
+    -- their slot padding and alignment go with them). Otherwise the exits stay and the mod buttons go last.
+    local exits, isExit, firstExit = {}, {}, nil
     for _, name in ipairs({ "ExitToMainMenuButton", "ExitToDesktopMenu" }) do
         local e = pm[name]
-        if valid(e) and menuHas(box, e) then exits[#exits + 1] = e end
+        local okI, idx = pcall(function() return box:GetChildIndex(e) end)
+        if valid(e) and okI and type(idx) == "number" and idx >= 0 then
+            exits[#exits + 1] = { w = e, idx = idx }
+            isExit[e:GetFullName()] = true
+            if not firstExit or idx < firstExit then firstExit = idx end
+        end
+    end
+    table.sort(exits, function(x, y) return x.idx < y.idx end)
+    if firstExit then
+        for i = firstExit, box:GetChildrenCount() - 1 do
+            local c = box:GetChildAt(i)
+            local n = valid(c) and c:GetFullName() or ""
+            if not (isExit[n] or isExtra[n]) then
+                exits = {}
+                if not MENU.exitsKept then MENU.exitsKept = true; log("pause menu: the game has entries after its exit buttons, so mod buttons go last") end
+                break
+            end
+        end
+    end
+    for _, e in ipairs(exits) do
+        e.slot = get(function()
+            local s = e.w.Slot
+            local p = s.Padding
+            return { pad = { Left = p.Left, Top = p.Top, Right = p.Right, Bottom = p.Bottom },
+                     h = s.HorizontalAlignment, v = s.VerticalAlignment }
+        end)
     end
     for _, w in ipairs(extras) do if w ~= b then pcall(function() box:RemoveChild(w) end) end end
-    for _, e in ipairs(exits) do pcall(function() box:RemoveChild(e) end) end
+    for _, e in ipairs(exits) do pcall(function() box:RemoveChild(e.w) end) end
     table.sort(extras, function(x, y) return sortKey(x) < sortKey(y) end)
     for _, w in ipairs(extras) do pcall(function() box:AddChildToVerticalBox(w) end) end
-    for _, e in ipairs(exits) do pcall(function() box:AddChildToVerticalBox(e) end) end
+    for _, e in ipairs(exits) do
+        local okA, slot = pcall(function() return box:AddChildToVerticalBox(e.w) end)
+        if okA and e.slot and valid(slot) then
+            pcall(function() slot:SetPadding(e.slot.pad) end)
+            if e.slot.h then pcall(function() slot:SetHorizontalAlignment(e.slot.h) end) end
+            if e.slot.v then pcall(function() slot:SetVerticalAlignment(e.slot.v) end) end
+        end
+    end
     MENU.pm, MENU.btn, MENU.btnName = pm, b, b:GetFullName()
+    MENU.pmPath = (tostring(get(function() return pm:GetFullName() end) or "")):match("^%S+%s+(.+)$")
     if not menuHas(box, b) then
         MENU.broken = true
         log("pause menu button could not be confirmed; use the key instead")
@@ -969,10 +1041,14 @@ local function menuTick()
         MENU.pending = nil
         local ok, err = pcall(MENU.onOpen)
         if not ok then log("menu error: " .. tostring(err)) end
+    elseif MENU.pending == "pad" then                  -- pad A on MODS: the panel docks in the pause menu
+        MENU.pending = nil
+        PAD.openDocked()
     elseif MENU.pending == "close" then
         MENU.pending = nil
         if MENU.onClose then pcall(MENU.onClose) end
     elseif cfg.ShowInPauseMenu then
+        hookPauseActivation()
         ensureMenuButton()
         PAD.pollMods()
     end
@@ -1453,6 +1529,21 @@ end
 
 -- One hook for every button click in the game (was two). The name is read once, and only while one of
 -- our buttons exists.
+-- A second click event (1.1.2): BP_OnClicked, which CommonButtonBase fires from its C++ click handling, so
+-- unlike HandleButtonClicked it is also seen for a pad's A. A mouse click fires both (HandleButtonClicked
+-- first, BP_OnClicked inside it), so BP_OnClicked only queues the button and the next tick routes it as a pad
+-- press, unless a click hook already handled that button within CLICK_DEDUP seconds: one click acts once.
+-- The GetSelected polling (PAD.pollMods / pollPanel) stays as the fallback; it now only clears the selection
+-- of a button a click event handled in the last second, instead of acting on it a second time.
+local CLICK_DEDUP = 0.2
+local clickedAt = {}                                   -- button full name -> os.clock() a click hook acted on it
+local padClick, padClickSeen = nil, false              -- button queued by BP_OnClicked; true once one was a pad press
+local function clickedRecently(n) return n ~= nil and clickedAt[n] ~= nil and os.clock() - clickedAt[n] < 1 end
+local function ourButton(n)
+    if n == MENU.btnName or (MENU.closeName and n == MENU.closeName) then return true end
+    local b = panel.open and panel.buttons or {}
+    return (b.mods and b.mods[n]) or (b.actions and b.actions[n]) or (b.reset and n == b.reset) or (b.close and n == b.close) or false
+end
 local panelHooked = false
 local function hookPanel()
     if panelHooked then return end
@@ -1461,10 +1552,30 @@ local function hookPanel()
         if not panel.open and not MENU.btnName then return end
         local okN, n = pcall(function() return self:get():GetFullName() end)
         if not okN then return end
+        if ourButton(n) then clickedAt[n] = os.clock() end
+        if padClick and padClick == n then padClick = nil end
         if panel.open then clickPanelButton(n) end
         menuClicked(n)
     end)
     if not clickHookOk then log("could not watch button clicks; use the menu key instead") end
+    local okB = pcall(RegisterHook, "/Script/CommonUI.CommonButtonBase:BP_OnClicked", function(self)
+        if not panel.open and not MENU.btnName then return end
+        local okN, n = pcall(function() return self:get():GetFullName() end)
+        if not okN or not ourButton(n) or (clickedAt[n] and os.clock() - clickedAt[n] < CLICK_DEDUP) then return end
+        padClick = n
+    end)
+    if not okB then log("could not watch pad clicks; reading the selection instead") end
+end
+
+-- Called first on every tick: a BP_OnClicked that no HandleButtonClicked claimed was a pad press.
+local function padClickTick()
+    local n = padClick
+    padClick = nil
+    if not n or not ourButton(n) or (clickedAt[n] and os.clock() - clickedAt[n] < CLICK_DEDUP) then return end
+    clickedAt[n] = os.clock()
+    if not padClickSeen then padClickSeen = true; log("controller clicks: using the game's click event") end
+    if panel.open then clickPanelButton(n) end
+    menuClicked(n, true)
 end
 
 -- Controller path (PAD table and constants: next to MENU). Measured in game 2026-09-29, game in front
@@ -1484,9 +1595,16 @@ function PAD.pollMods()
     local ok, sel = pcall(function() return MENU.btn:GetSelected() end)
     if not (ok and sel) then PAD.seen = false; return end
     if MENU.pending then return end
+    if clickedRecently(MENU.btnName) then PAD.seen = false; PAD.unselect(MENU.btn); return end   -- a click event had it
     if not PAD.seen then PAD.seen = true; return end
+    PAD.openDocked()
+end
+
+-- Open the panel docked in the pause menu, for a pad press on MODS (from the polling above or BP_OnClicked).
+function PAD.openDocked()
     PAD.seen = false
     PAD.unselect(MENU.btn)
+    if panel.open then return end
     local okO, err = pcall(openPanel, "pad")
     if not okO then log("controller panel error: " .. tostring(err)) end
 end
@@ -1502,7 +1620,17 @@ function PAD.dock(frame, W, H)
     if not valid(root) then return false, "no pause menu layout" end
     local canvas, cls = root, ""
     pcall(function() cls = root:GetClass():GetFName():ToString() end)
-    if cls ~= "CanvasPanel" then pcall(function() canvas = root:GetContent() end) end
+    if cls ~= "CanvasPanel" then
+        -- Expected: a BackgroundBlur (a content widget) holding the canvas. Any other root may have no
+        -- GetContent, or hold something else: then the pad panel is not docked (logged once).
+        local okC, inner = pcall(function() return root:GetContent() end)
+        local isCanvas = okC and valid(inner) and get(function() return inner:IsA("/Script/UMG.CanvasPanel") end) ~= false
+        if not isCanvas then
+            if not PAD.layoutLogged then PAD.layoutLogged = true; log("pause menu layout not recognised (root " .. cls .. "); no controller panel") end
+            return false, "no canvas in the pause menu"
+        end
+        canvas = inner
+    end
     local okS, slot = pcall(function() return canvas:AddChildToCanvas(frame) end)
     if not (okS and valid(slot)) then return false, "could not dock into the pause menu" end
     pcall(function() slot:SetPosition({ X = PAD.X, Y = PAD.Y }) end)
@@ -1565,7 +1693,7 @@ function PAD.pollPanel()
         if ok and sel then
             PAD.unselect(b)
             local okN, n = pcall(function() return b:GetFullName() end)
-            if okN and not panel.pending then clickPanelButton(n) end
+            if okN and not panel.pending and not clickedRecently(n) then clickPanelButton(n) end
             return
         end
     end
@@ -1773,9 +1901,10 @@ local function forgetWorld()
     pcall(saveDirty, true)
     cachedPC, nextPCScan = nil, 0
     pauseSeen, pauseKnown, pauseLookAt = {}, nil, 0
-    MENU.pm, MENU.btn, MENU.btnName, MENU.shownLabel = nil, nil, nil, nil
+    MENU.pm, MENU.btn, MENU.btnName, MENU.shownLabel, MENU.pmPath = nil, nil, nil, nil, nil
     MENU.pending, MENU.wait = nil, 0
     PAD.seen = false
+    padClick, clickedAt = nil, {}
     panel.open, panel.frame, panel.ui, panel.rows, panel.buttons = false, nil, nil, {}, {}
     panel.mode, panel.padBtns, panel.order, panel.pm, panel.pc = nil, nil, nil, nil, nil
     panel.pending, panel.hintShown = nil, nil
@@ -1798,6 +1927,7 @@ local tickErrors = 0
 -- corrupted a mod's Lua state under load). LoopInGameThreadWithDelay keeps all of it on one thread.
 local function mainTick()
     if paused() then return end                        -- a map load is settling (see forgetWorld)
+    pcall(padClickTick)                                -- before panelTick: its selection poll then sees the click
     local ok, err = pcall(panelTick)
     if not ok then
         tickErrors = tickErrors + 1

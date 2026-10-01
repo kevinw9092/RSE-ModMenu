@@ -2,6 +2,17 @@
 
 RSE-ModMenu is Mod Menu 1.0.12 by Maxxfilth (MIT) with the fixes below. The mod id (`ModMenu`) and every shared variable name are unchanged, so every mod that supports Mod Menu works as before.
 
+## 1.1.2 (RSE)
+**Safety**
+- **The pause menu's own entries stay put.** Adding MODS used to re-sort every pause menu entry it didn't know by label, including the agility course buttons and the input legend. Now only buttons made by mods are moved. The exit buttons are moved below them only when nothing of the game's own comes after them, and they keep their spacing. Otherwise MODS goes last.
+- Docking the controller panel checks that the pause menu still has the layout it expects. If it doesn't, the panel isn't docked and the log says so once.
+
+**Controller**
+- A pad's A on MODS or on a panel button is also picked up from the game's click event (`BP_OnClicked`), so it no longer waits for the selection check. A click seen by both events acts once. The selection check stays as the fallback.
+
+**Speed**
+- MODS is added as soon as the pause menu opens, using the game's focus request when the menu activates. The search after Esc stays as the fallback, and it still finds the first pause menu after launch.
+
 ## 1.1.1 (RSE)
 **Safety**
 - **Map loads:** the menu now forgets the pause menu, its MODS button, the panel and the player controller when a map starts loading, and waits 10 s after the load before touching the game again. Calling into an object of the old world can crash the game; Esc shows MODS again once the settle is over.
